@@ -14,6 +14,7 @@ using namespace std;
 
 #pragma comment(lib, "detours.lib")
 #pragma comment(lib, "User32.lib")
+#pragma comment(lib, "Advapi32.lib")
 
 fstream* logFile;
 fstream* tmpFile = new fstream();
@@ -31,6 +32,11 @@ bool injectOpenFile = false;
 bool injectCreateFile = false;
 bool injectReadFile = false;
 bool injectWriteFile = false;
+bool injectRegCreateKeyEx = false;
+bool injectRegSetValueEx = false;
+bool injectRegDeleteValue = false;
+bool injectRegCloseKey = false;
+bool injectRegOpenKeyEx = false;
 
 QReadWriteLock lock;
 bool mutexSignal = false;
@@ -41,21 +47,21 @@ unsigned int logCounter = 0;
 #pragma comment(linker, "/Section:Shared,rws")
 
 extern "C" __declspec(dllexport) void openInjectMessageBoxA(bool choice){injectMessageBoxA = choice;};
-extern "C" __declspec(dllexport) bool isInjectMessageBoxA(){return injectMessageBoxA;};
 extern "C" __declspec(dllexport) void openInjectMessageBoxW(bool choice){injectMessageBoxW = choice;};
-extern "C" __declspec(dllexport) bool isInjectMessageBoxW(){return injectMessageBoxW;};
 extern "C" __declspec(dllexport) void openInjectHeapCreate(bool choice){injectHeapCreate = choice;};
-extern "C" __declspec(dllexport) bool isInjectHeapCreate(){return injectHeapCreate;};
 extern "C" __declspec(dllexport) void openInjectHeapDestroy(bool choice){injectHeapDestroy = choice;};
-extern "C" __declspec(dllexport) bool isInjectHeapDestroy(){return injectHeapDestroy;};
 extern "C" __declspec(dllexport) void openInjectHeapAlloc(bool choice){injectHeapAlloc = choice;};
-extern "C" __declspec(dllexport) bool isInjectHeapAlloc(){return injectHeapAlloc;};
 extern "C" __declspec(dllexport) void openInjectHeapFree(bool choice){injectHeapFree = choice;};
-extern "C" __declspec(dllexport) bool isInjectHeapFree(){return injectHeapFree;};
 extern "C" __declspec(dllexport) void openInjectOpenFile(bool choice){injectOpenFile = choice;};
 extern "C" __declspec(dllexport) void openInjectCreateFile(bool choice){injectCreateFile = choice;};
 extern "C" __declspec(dllexport) void openInjectReadFile(bool choice){injectReadFile = choice;};
 extern "C" __declspec(dllexport) void openInjectWriteFile(bool choice){injectWriteFile = choice;};
+extern "C" __declspec(dllexport) void openInjectRegCreateKeyEx(bool choice){injectRegCreateKeyEx = choice;};
+extern "C" __declspec(dllexport) void openInjectRegSetValueEx(bool choice){injectRegSetValueEx = choice;};
+extern "C" __declspec(dllexport) void openInjectRegDeleteValue(bool choice){injectRegDeleteValue = choice;};
+extern "C" __declspec(dllexport) void openInjectRegCloseKey(bool choice){injectRegCloseKey = choice;};
+extern "C" __declspec(dllexport) void openInjectRegOpenKeyEx(bool choice){injectRegOpenKeyEx = choice;};
+
 extern "C" __declspec(dllexport) QReadWriteLock* getLock(){return &lock;};
 extern "C" __declspec(dllexport) void setMutexSignal(){mutexSignal = false;};
 extern "C" __declspec(dllexport) bool getMutexSignal(){return mutexSignal;};
@@ -503,7 +509,7 @@ extern "C" __declspec(dllexport)BOOL WINAPI NewWriteFile(
     retStr += returnVal ? "1 / true\n" : "0 / false\n";
     char outputArgVal[0x100];
     sprintf_s(outputArgVal, "After execution:\n"
-                            "\tLPDWORD lpNumberOfBytesWrite => %u / 0x%x\n", *lpNumberOfBytesWritten, *lpNumberOfBytesWritten);
+                            "\tLPDWORD lpNumberOfBytesWritten => %u / 0x%x\n", *lpNumberOfBytesWritten, *lpNumberOfBytesWritten);
     getLastInfoAndWrite(ArgsAndDetails, retStr, outputArgVal);
     entranceWatchdog = false;
     return returnVal;
@@ -542,6 +548,241 @@ extern "C" __declspec(dllexport)HFILE WINAPI NewOpenFile(
     return returnVal;
 }
 
+static LSTATUS (WINAPI* OldRegCreateKeyEx)(
+        _In_ HKEY hKey,
+        _In_ LPCWSTR lpSubKey,
+        _Reserved_ DWORD Reserved,
+        _In_opt_ LPWSTR lpClass,
+        _In_ DWORD dwOptions,
+        _In_ REGSAM samDesired,
+        _In_opt_ CONST LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+        _Out_ PHKEY phkResult,
+        _Out_opt_ LPDWORD lpdwDisposition
+        ) = RegCreateKeyEx;
+static LSTATUS (WINAPI* OldRegSetValueEx)(
+        _In_ HKEY hKey,
+        _In_opt_ LPCWSTR lpValueName,
+        _Reserved_ DWORD Reserved,
+        _In_ DWORD dwType,
+        _In_reads_bytes_opt_(cbData) CONST BYTE* lpData,
+        _In_ DWORD cbData
+        ) = RegSetValueEx;
+static LSTATUS (WINAPI* OldRegDeleteValue)(
+        _In_ HKEY hKey,
+        _In_opt_ LPCWSTR lpValueName
+        ) = RegDeleteValue;
+static LSTATUS (WINAPI* OldRegCloseKey)(
+        _In_ HKEY hKey
+        ) = RegCloseKey;
+static LSTATUS (WINAPI* OldRegOpenKeyEx)(
+        _In_ HKEY hKey,
+        _In_opt_ LPCWSTR lpSubKey,
+        _In_opt_ DWORD ulOptions,
+        _In_ REGSAM samDesired,
+        _Out_ PHKEY phkResult
+        ) = RegOpenKeyEx;
+
+extern "C" __declspec(dllexport)LSTATUS WINAPI NewRegCreateKeyEx(
+        _In_ HKEY hKey,
+        _In_ LPCWSTR lpSubKey,
+        _Reserved_ DWORD Reserved,
+        _In_opt_ LPWSTR lpClass,
+        _In_ DWORD dwOptions,
+        _In_ REGSAM samDesired,
+        _In_opt_ CONST LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+        _Out_ PHKEY phkResult,
+        _Out_opt_ LPDWORD lpdwDisposition
+        ){
+    if(entranceWatchdog)
+        return OldRegCreateKeyEx(hKey, lpSubKey, Reserved, lpClass,
+                                 dwOptions, samDesired, lpSecurityAttributes, phkResult, lpdwDisposition);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectRegCreateKeyEx){
+        char* buffer = writeLog("RegCreateKeyEx");
+        char* args = (char*)calloc(1, 0x200);
+        sprintf(args, "Arguments:\n"
+                        "\tHKEY hKey = 0x%p\n"
+                        "\tLPCWSTR lpSubKey = 0x%p / \"%ls\"\n"
+                        "\tDWORD Reserved = %lu / %#lx\n"
+                        "\tLPWSTR lpClass = 0x%p / \"%ls\"\n"
+                        "\tDWORD dwOptions = %lu / %#lx\n"
+                        "\tREGSAM samDesired = %lu / %#lx\n"
+                        "\tLPSECURITY_ATTRIBUTES lpSecurityAttributes = 0x%p\n"
+                        "\tPHKEY phkResult = 0x%p\n"
+                        "\tLPDWORD lpdwDisposition = 0x%p\n"
+                        "Current process name: ", hKey, lpSubKey, lpSubKey, Reserved, Reserved,
+                lpClass, lpClass, dwOptions, dwOptions, samDesired, samDesired, lpSecurityAttributes,
+                phkResult, lpdwDisposition);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    LSTATUS returnVal = OldRegCreateKeyEx(hKey, lpSubKey, Reserved, lpClass,
+                                       dwOptions, samDesired, lpSecurityAttributes, phkResult, lpdwDisposition);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    char retStr[0x30];
+    sprintf_s(retStr, "Return value: (LSTATUS) %#x\n", returnVal);
+    char outputArgVal[0x100];
+    sprintf_s(outputArgVal, "After execution:\n"
+                            "\tPHKEY phkResult => 0x%p\n", *phkResult);
+    getLastInfoAndWrite(ArgsAndDetails, retStr, outputArgVal);
+    entranceWatchdog = false;
+    return returnVal;
+}
+
+extern "C" __declspec(dllexport)LSTATUS WINAPI NewRegSetValueEx(
+        _In_ HKEY hKey,
+        _In_opt_ LPCWSTR lpValueName,
+        _Reserved_ DWORD Reserved,
+        _In_ DWORD dwType,
+        _In_reads_bytes_opt_(cbData) CONST BYTE* lpData,
+        _In_ DWORD cbData
+        ){
+    if(entranceWatchdog)
+        return OldRegSetValueEx(hKey, lpValueName, Reserved, dwType, lpData, cbData);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectRegSetValueEx){
+        char* buffer = writeLog("RegSetValueEx");
+        char* args = (char*)calloc(1, 0x200);
+        if(dwType == REG_SZ || dwType == REG_EXPAND_SZ || dwType == REG_MULTI_SZ)
+            sprintf(args, "Arguments:\n"
+                            "\tHKEY hKey = 0x%p\n"
+                            "\tLPCWSTR lpValueName = 0x%p / \"%ls\"\n"
+                            "\tDWORD Reserved = %lu / %#lx\n"
+                            "\tDWORD dwType = %lu / %#lx\n"
+                            "\tBYTE* lpData = 0x%p / \"%ls\"\n"
+                            "\tDWORD cbData = %lu / %#lx\n"
+                            "Current process name: ", hKey, lpValueName, lpValueName, Reserved, Reserved,
+                    dwType, dwType, lpData, (wchar_t*)lpData, cbData, cbData);
+        else
+            sprintf(args, "Arguments:\n"
+                            "\tHKEY hKey = 0x%p\n"
+                            "\tLPCWSTR lpValueName = 0x%p / \"%ls\"\n"
+                            "\tDWORD Reserved = %lu / %#lx\n"
+                            "\tDWORD dwType = %lu / %#lx\n"
+                            "\tBYTE* lpData = 0x%p\n"
+                            "\tDWORD cbData = %lu / %#lx\n"
+                            "Current process name: ", hKey, lpValueName, lpValueName, Reserved, Reserved,
+                    dwType, dwType, lpData, cbData, cbData);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    LSTATUS returnVal = OldRegSetValueEx(hKey, lpValueName, Reserved, dwType, lpData, cbData);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    char retStr[0x30];
+    sprintf_s(retStr, "Return value: (LSTATUS) %#x\n", returnVal);
+    getLastInfoAndWrite(ArgsAndDetails, retStr);
+    entranceWatchdog = false;
+    return returnVal;
+}
+
+extern "C" __declspec(dllexport)LSTATUS WINAPI NewRegDeleteValue(
+        _In_ HKEY hKey,
+        _In_opt_ LPCWSTR lpValueName
+        ){
+    if(entranceWatchdog)
+        return OldRegDeleteValue(hKey, lpValueName);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectRegDeleteValue){
+        char* buffer = writeLog("RegDeleteValue");
+        char* args = (char*)calloc(1, 0x200);
+        sprintf(args, "Arguments:\n"
+                        "\tHKEY hKey = 0x%p\n"
+                        "\tLPCWSTR lpValueName = 0x%p / \"%ls\"\n"
+                        "Current process name: ", hKey, lpValueName, lpValueName);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    LSTATUS returnVal = OldRegDeleteValue(hKey, lpValueName);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    char retStr[0x30];
+    sprintf_s(retStr, "Return value: (LSTATUS) %#x\n", returnVal);
+    getLastInfoAndWrite(ArgsAndDetails, retStr);
+    entranceWatchdog = false;
+    return returnVal;
+}
+
+extern "C" __declspec(dllexport)LSTATUS WINAPI NewRegCloseKey(
+        _In_ HKEY hKey
+        ){
+    if(entranceWatchdog)
+        return OldRegCloseKey(hKey);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectRegCloseKey){
+        char* buffer = writeLog("RegCloseKey");
+        char* args = (char*)calloc(1, 0x200);
+        sprintf(args, "Arguments:\n"
+                        "\tHKEY hKey = 0x%p\n"
+                        "Current process name: ", hKey);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    LSTATUS returnVal = OldRegCloseKey(hKey);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    char retStr[0x30];
+    sprintf_s(retStr, "Return value: (LSTATUS) %#x\n", returnVal);
+    getLastInfoAndWrite(ArgsAndDetails, retStr);
+    entranceWatchdog = false;
+    return returnVal;
+}
+
+extern "C" __declspec(dllexport)LSTATUS WINAPI NewRegOpenKeyEx(
+        _In_ HKEY hKey,
+        _In_opt_ LPCWSTR lpSubKey,
+        _In_opt_ DWORD ulOptions,
+        _In_ REGSAM samDesired,
+        _Out_ PHKEY phkResult
+        ){
+    if(entranceWatchdog)
+        return OldRegOpenKeyEx(hKey, lpSubKey, ulOptions, samDesired, phkResult);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectRegOpenKeyEx){
+        char* buffer = writeLog("RegOpenKeyEx");
+        char* args = (char*)calloc(1, 0x200);
+        sprintf(args, "Arguments:\n"
+                        "\tHKEY hKey = 0x%p\n"
+                        "\tLPCWSTR lpSubKey = 0x%p / \"%ls\"\n"
+                        "\tDWORD ulOptions = %lu / %lx\n"
+                        "\tREGSAM samDesired = %lu / %lx\n"
+                        "\tPHKEY phkResult = 0x%p\n"
+                        "Current process name: ", hKey, lpSubKey, lpSubKey,
+                ulOptions, ulOptions, samDesired, samDesired, phkResult);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    LSTATUS returnVal = OldRegOpenKeyEx(hKey, lpSubKey, ulOptions, samDesired, phkResult);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    char retStr[0x30];
+    sprintf_s(retStr, "Return value: (LSTATUS) %#x\n", returnVal);
+    getLastInfoAndWrite(ArgsAndDetails, retStr);
+    entranceWatchdog = false;
+    return returnVal;
+}
+
 BOOL APIENTRY DllMain( HMODULE hModule,
                        DWORD  ul_reason_for_call,
                        LPVOID lpReserved
@@ -563,6 +804,11 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         DetourAttach(&(PVOID&)OldCreateFile, (void*)NewCreateFile);
         DetourAttach(&(PVOID&)OldReadFile, (void*)NewReadFile);
         DetourAttach(&(PVOID&)OldWriteFile, (void*)NewWriteFile);
+        DetourAttach(&(PVOID&)OldRegCreateKeyEx, (void*)NewRegCreateKeyEx);
+        DetourAttach(&(PVOID&)OldRegSetValueEx, (void*)NewRegSetValueEx);
+        DetourAttach(&(PVOID&)OldRegDeleteValue, (void*)NewRegDeleteValue);
+        DetourAttach(&(PVOID&)OldRegCloseKey, (void*)NewRegCloseKey);
+        DetourAttach(&(PVOID&)OldRegOpenKeyEx, (void*)NewRegOpenKeyEx);
         DetourTransactionCommit();
         break;
     }
@@ -580,6 +826,11 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         DetourDetach(&(PVOID&)OldCreateFile, (void*)NewCreateFile);
         DetourDetach(&(PVOID&)OldReadFile, (void*)NewReadFile);
         DetourDetach(&(PVOID&)OldWriteFile, (void*)NewWriteFile);
+        DetourDetach(&(PVOID&)OldRegCreateKeyEx, (void*)NewRegCreateKeyEx);
+        DetourDetach(&(PVOID&)OldRegSetValueEx, (void*)NewRegSetValueEx);
+        DetourDetach(&(PVOID&)OldRegDeleteValue, (void*)NewRegDeleteValue);
+        DetourDetach(&(PVOID&)OldRegCloseKey, (void*)NewRegCloseKey);
+        DetourDetach(&(PVOID&)OldRegOpenKeyEx, (void*)NewRegOpenKeyEx);
         DetourTransactionCommit();
         logCounter = 0;
         logFile->close();
