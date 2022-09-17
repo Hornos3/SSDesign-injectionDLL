@@ -1,6 +1,7 @@
 ﻿// dllmain.cpp : 定义 DLL 应用程序的入口点。
 #include "pch.h"
 #include "framework.h"
+#include "WinSock2.h"
 #include "detours.h"
 #include "winInfo.h"
 #include "util.h"
@@ -8,6 +9,7 @@
 #include <cstdarg>
 #include <iostream>
 #include <fstream>
+#include <QString>
 #include <QReadWriteLock>
 
 using namespace std;
@@ -15,6 +17,7 @@ using namespace std;
 #pragma comment(lib, "detours.lib")
 #pragma comment(lib, "User32.lib")
 #pragma comment(lib, "Advapi32.lib")
+#pragma comment(lib, "ws2_32.lib")
 
 fstream* logFile;
 fstream* tmpFile = new fstream();
@@ -32,14 +35,15 @@ bool injectOpenFile = false;
 bool injectCreateFile = false;
 bool injectReadFile = false;
 bool injectWriteFile = false;
+bool injectCloseHandle = false;
 bool injectRegCreateKeyEx = false;
 bool injectRegSetValueEx = false;
 bool injectRegDeleteValue = false;
 bool injectRegCloseKey = false;
 bool injectRegOpenKeyEx = false;
 
-QReadWriteLock lock;
 bool mutexSignal = false;
+char lastHookbuffer[0x400] = {0};
 #pragma data_seg()
 
 bool entranceWatchdog = false;
@@ -56,15 +60,17 @@ extern "C" __declspec(dllexport) void openInjectOpenFile(bool choice){injectOpen
 extern "C" __declspec(dllexport) void openInjectCreateFile(bool choice){injectCreateFile = choice;};
 extern "C" __declspec(dllexport) void openInjectReadFile(bool choice){injectReadFile = choice;};
 extern "C" __declspec(dllexport) void openInjectWriteFile(bool choice){injectWriteFile = choice;};
+extern "C" __declspec(dllexport) void openInjectCloseHandle(bool choice){injectCloseHandle = choice;};
 extern "C" __declspec(dllexport) void openInjectRegCreateKeyEx(bool choice){injectRegCreateKeyEx = choice;};
 extern "C" __declspec(dllexport) void openInjectRegSetValueEx(bool choice){injectRegSetValueEx = choice;};
 extern "C" __declspec(dllexport) void openInjectRegDeleteValue(bool choice){injectRegDeleteValue = choice;};
 extern "C" __declspec(dllexport) void openInjectRegCloseKey(bool choice){injectRegCloseKey = choice;};
 extern "C" __declspec(dllexport) void openInjectRegOpenKeyEx(bool choice){injectRegOpenKeyEx = choice;};
 
-extern "C" __declspec(dllexport) QReadWriteLock* getLock(){return &lock;};
 extern "C" __declspec(dllexport) void setMutexSignal(){mutexSignal = false;};
 extern "C" __declspec(dllexport) bool getMutexSignal(){return mutexSignal;};
+
+extern "C" __declspec(dllexport) char* getLastHookBeforeCall(){return lastHookbuffer;};
 
 char* writeLog(const char* funcName) {
     char* buffer = (char*)calloc(1, 0x400);
@@ -148,7 +154,7 @@ string getMainInfo(char* currentTime, char* argsInfo){
     string fileInfo = getFileInfo(processNameA);
 
     totalOut += fileInfo;
-
+    strcpy_s(lastHookbuffer, totalOut.c_str());
     return totalOut;
 }
 
@@ -387,6 +393,7 @@ static HFILE (WINAPI* OldOpenFile)(
     _Inout_ LPOFSTRUCT lpReOpenBuff,
     _In_ UINT uStyle
     ) = OpenFile;
+static BOOL (WINAPI* OldCloseHandle)(_In_ _Post_ptr_invalid_ HANDLE hObject) = CloseHandle;
 
 extern "C" __declspec(dllexport)HANDLE WINAPI NewCreateFile(
         _In_ LPCWSTR lpFileName,//指向文件名的指针
@@ -543,6 +550,33 @@ extern "C" __declspec(dllexport)HFILE WINAPI NewOpenFile(
     }
     char retStr[0x30];
     sprintf_s(retStr, "Return value: (HFILE) %#x\n", returnVal);
+    getLastInfoAndWrite(ArgsAndDetails, retStr);
+    entranceWatchdog = false;
+    return returnVal;
+}
+
+extern "C" __declspec(dllexport)BOOL WINAPI NewCloseHandle(_In_ _Post_ptr_invalid_ HANDLE hObject){
+    if(entranceWatchdog)
+        return OldCloseHandle(hObject);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectCloseHandle){
+        char* buffer = writeLog("CloseHandle");
+        char* args = (char*)calloc(1, 0x200);
+        sprintf(args, "Arguments:\n"
+                        "\tHANDLE hObject = 0x%p\n"
+                        "Current process name: ", hObject);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    BOOL returnVal = OldCloseHandle(hObject);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    string retStr = "Return Value: (BOOL) ";
+    retStr += returnVal ? "1 / true\n" : "0 / false\n";
     getLastInfoAndWrite(ArgsAndDetails, retStr);
     entranceWatchdog = false;
     return returnVal;
@@ -778,10 +812,49 @@ extern "C" __declspec(dllexport)LSTATUS WINAPI NewRegOpenKeyEx(
     }
     char retStr[0x30];
     sprintf_s(retStr, "Return value: (LSTATUS) %#x\n", returnVal);
-    getLastInfoAndWrite(ArgsAndDetails, retStr);
+    char outputArgVal[0x100];
+    sprintf_s(outputArgVal, "After execution:\n"
+                            "\tPHKEY phkResult => 0x%p\n", *phkResult);
+    getLastInfoAndWrite(ArgsAndDetails, retStr, outputArgVal);
     entranceWatchdog = false;
     return returnVal;
 }
+
+static int (WSAAPI* OldWSASend)(
+    _In_ SOCKET s,
+    _In_reads_(dwBufferCount) LPWSABUF lpBuffers,
+    _In_ DWORD dwBufferCount,
+    _Out_opt_ LPDWORD lpNumberOfBytesSent,
+    _In_ DWORD dwFlags,
+    _Inout_opt_ LPWSAOVERLAPPED lpOverlapped,
+    _In_opt_ LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
+    ) = WSASend;
+static int (WSAAPI* OldWSARecv)(
+    _In_ SOCKET s,
+    _In_reads_(dwBufferCount) __out_data_source(NETWORK) LPWSABUF lpBuffers,
+    _In_ DWORD dwBufferCount,
+    _Out_opt_ LPDWORD lpNumberOfBytesRecvd,
+    _Inout_ LPDWORD lpFlags,
+    _Inout_opt_ LPWSAOVERLAPPED lpOverlapped,
+    _In_opt_ LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
+    ) = WSARecv;
+static int (WSAAPI* OldWSAConnect)(
+    _In_ SOCKET s,
+    _In_reads_bytes_(namelen) const struct sockaddr FAR * name,
+    _In_ int namelen,
+    _In_opt_ LPWSABUF lpCallerData,
+    _Out_opt_ LPWSABUF lpCalleeData,
+    _In_opt_ LPQOS lpSQOS,
+    _In_opt_ LPQOS lpGQOS
+    ) = WSAConnect;
+static SOCKET (WSAAPI* OldWSASocketW)(
+    _In_ int af,
+    _In_ int type,
+    _In_ int protocol,
+    _In_opt_ LPWSAPROTOCOL_INFOW lpProtocolInfo,
+    _In_ GROUP g,
+    _In_ DWORD dwFlags
+    ) = WSASocketW;
 
 BOOL APIENTRY DllMain( HMODULE hModule,
                        DWORD  ul_reason_for_call,
@@ -792,6 +865,7 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     {
     case DLL_PROCESS_ATTACH: {
         logFile = new fstream("./hookLog/hookLogs.log", ios::trunc | ios::out);
+        memset(lastHookbuffer, 0, 0x400);
         DisableThreadLibraryCalls(hModule);
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
@@ -804,6 +878,7 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         DetourAttach(&(PVOID&)OldCreateFile, (void*)NewCreateFile);
         DetourAttach(&(PVOID&)OldReadFile, (void*)NewReadFile);
         DetourAttach(&(PVOID&)OldWriteFile, (void*)NewWriteFile);
+        DetourAttach(&(PVOID&)OldCloseHandle, (void*)NewCloseHandle);
         DetourAttach(&(PVOID&)OldRegCreateKeyEx, (void*)NewRegCreateKeyEx);
         DetourAttach(&(PVOID&)OldRegSetValueEx, (void*)NewRegSetValueEx);
         DetourAttach(&(PVOID&)OldRegDeleteValue, (void*)NewRegDeleteValue);
@@ -826,6 +901,7 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         DetourDetach(&(PVOID&)OldCreateFile, (void*)NewCreateFile);
         DetourDetach(&(PVOID&)OldReadFile, (void*)NewReadFile);
         DetourDetach(&(PVOID&)OldWriteFile, (void*)NewWriteFile);
+        DetourDetach(&(PVOID&)OldCloseHandle, (void*)NewCloseHandle);
         DetourDetach(&(PVOID&)OldRegCreateKeyEx, (void*)NewRegCreateKeyEx);
         DetourDetach(&(PVOID&)OldRegSetValueEx, (void*)NewRegSetValueEx);
         DetourDetach(&(PVOID&)OldRegDeleteValue, (void*)NewRegDeleteValue);
