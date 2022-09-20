@@ -19,8 +19,9 @@ using namespace std;
 #pragma comment(lib, "Advapi32.lib")
 #pragma comment(lib, "ws2_32.lib")
 
-fstream* logFile;
+fstream* memoryCap;
 fstream* tmpFile = new fstream();
+fstream* tmpCap = new fstream();
 SYSTEMTIME st;
 HANDLE STDIN, STDOUT, STDERR;
 
@@ -41,6 +42,13 @@ bool injectRegSetValueEx = false;
 bool injectRegDeleteValue = false;
 bool injectRegCloseKey = false;
 bool injectRegOpenKeyEx = false;
+bool injectRegDeleteKeyEx = false;
+bool injectSend = false;
+bool injectRecv = false;
+bool injectConnect = false;
+bool injectBind = false;
+bool injectSocket = false;
+bool injectAccept = false;
 
 bool mutexSignal = false;
 char lastHookbuffer[0x400] = {0};
@@ -66,6 +74,13 @@ extern "C" __declspec(dllexport) void openInjectRegSetValueEx(bool choice){injec
 extern "C" __declspec(dllexport) void openInjectRegDeleteValue(bool choice){injectRegDeleteValue = choice;};
 extern "C" __declspec(dllexport) void openInjectRegCloseKey(bool choice){injectRegCloseKey = choice;};
 extern "C" __declspec(dllexport) void openInjectRegOpenKeyEx(bool choice){injectRegOpenKeyEx = choice;};
+extern "C" __declspec(dllexport) void openInjectRegDeleteKeyEx(bool choice){injectRegDeleteKeyEx = choice;};
+extern "C" __declspec(dllexport) void openInjectSend(bool choice){injectSend = choice;};
+extern "C" __declspec(dllexport) void openInjectRecv(bool choice){injectRecv = choice;};
+extern "C" __declspec(dllexport) void openInjectConnect(bool choice){injectConnect = choice;};
+extern "C" __declspec(dllexport) void openInjectSocket(bool choice){injectSocket = choice;};
+extern "C" __declspec(dllexport) void openInjectBind(bool choice){injectBind = choice;};
+extern "C" __declspec(dllexport) void openInjectAccept(bool choice){injectAccept = choice;};
 
 extern "C" __declspec(dllexport) void setMutexSignal(){mutexSignal = false;};
 extern "C" __declspec(dllexport) bool getMutexSignal(){return mutexSignal;};
@@ -158,19 +173,33 @@ string getMainInfo(char* currentTime, char* argsInfo){
     return totalOut;
 }
 
-void getLastInfoAndWrite(string totalOut, string returnVal, string otherString = ""){
+void getLastInfoAndWrite(string totalOut, string returnVal, string otherString = "",
+                         unsigned bufLen = 0, const char* buf = nullptr){
     totalOut += returnVal;
     totalOut += otherString;
     totalOut += "----------------------------------------------------\n";
 
-//    lock.lockForRead();
     while(mutexSignal);
-    *logFile << totalOut;
+
+    // 写入二进制文件，拷贝内存中的内容
+    uint64_t addr = (uint64_t)buf;
+    unsigned size = bufLen;
+    memoryCap->write((char*)(&addr), 8);
+    memoryCap->write((char*)(&size), 4);
+    if(bufLen != 0)
+        memoryCap->write(buf, bufLen);
+
+    tmpCap->open("./hookLog/lastCap.dat", ios::binary | ios::out | ios::trunc);
+    if(bufLen != 0)
+        tmpCap->write(buf, bufLen);
+    tmpCap->close();
+
     tmpFile->open("./hookLog/lasthook.tmp", ios::out | ios::trunc);
     *tmpFile << totalOut;
     tmpFile->close();
+
     mutexSignal = true;
-//    lock.unlock();
+
     logCounter++;
 }
 
@@ -447,7 +476,7 @@ extern "C" __declspec(dllexport)BOOL WINAPI NewReadFile(
         __out LPDWORD lpNumberOfBytesRead, // 实际读取到的字节数
         __in LPOVERLAPPED lpOverlapped // OVERLAPPED 结构，一般设定为 NULL
         ){
-    if(entranceWatchdog)
+    if(entranceWatchdog || hFile == GetStdHandle(STD_INPUT_HANDLE))
         return OldReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped);
     entranceWatchdog = true;
     string ArgsAndDetails;
@@ -476,7 +505,10 @@ extern "C" __declspec(dllexport)BOOL WINAPI NewReadFile(
     char outputArgVal[0x100];
     sprintf_s(outputArgVal, "After execution:\n"
                             "\tLPDWORD lpNumberOfBytesRead => %u / 0x%x\n", *lpNumberOfBytesRead, *lpNumberOfBytesRead);
-    getLastInfoAndWrite(ArgsAndDetails, retStr, outputArgVal);
+    if(hFile != STDIN && hFile != STDOUT && hFile != STDERR)
+        getLastInfoAndWrite(ArgsAndDetails, retStr, outputArgVal, *lpNumberOfBytesRead, (char*)lpBuffer);
+    else
+        getLastInfoAndWrite(ArgsAndDetails, retStr, outputArgVal);
     entranceWatchdog = false;
     return returnVal;
 }
@@ -488,7 +520,7 @@ extern "C" __declspec(dllexport)BOOL WINAPI NewWriteFile(
         __out         LPDWORD lpNumberOfBytesWritten, // 实际写入的字节数
         __in          LPOVERLAPPED lpOverlapped       // OVERLAPPED 结构，一般设定为 NULL
         ){
-    if(entranceWatchdog)
+    if(entranceWatchdog || hFile == GetStdHandle(STD_OUTPUT_HANDLE) || hFile == GetStdHandle(STD_ERROR_HANDLE))
         return OldWriteFile(hFile, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, lpOverlapped);
     entranceWatchdog = true;
     string ArgsAndDetails;
@@ -517,7 +549,10 @@ extern "C" __declspec(dllexport)BOOL WINAPI NewWriteFile(
     char outputArgVal[0x100];
     sprintf_s(outputArgVal, "After execution:\n"
                             "\tLPDWORD lpNumberOfBytesWritten => %u / 0x%x\n", *lpNumberOfBytesWritten, *lpNumberOfBytesWritten);
-    getLastInfoAndWrite(ArgsAndDetails, retStr, outputArgVal);
+    if(hFile != STDIN && hFile != STDOUT && hFile != STDERR)
+        getLastInfoAndWrite(ArgsAndDetails, retStr, outputArgVal, *lpNumberOfBytesWritten, (char*)lpBuffer);
+    else
+        getLastInfoAndWrite(ArgsAndDetails, retStr, outputArgVal);
     entranceWatchdog = false;
     return returnVal;
 }
@@ -615,6 +650,12 @@ static LSTATUS (WINAPI* OldRegOpenKeyEx)(
         _In_ REGSAM samDesired,
         _Out_ PHKEY phkResult
         ) = RegOpenKeyEx;
+static LSTATUS (WINAPI* OldRegDeleteKeyEx)(
+        _In_ HKEY hKey,
+        _In_ LPCWSTR lpSubKey,
+        _In_ REGSAM samDesired,
+        _Reserved_ DWORD Reserved
+        ) = RegDeleteKeyEx;
 
 extern "C" __declspec(dllexport)LSTATUS WINAPI NewRegCreateKeyEx(
         _In_ HKEY hKey,
@@ -820,41 +861,334 @@ extern "C" __declspec(dllexport)LSTATUS WINAPI NewRegOpenKeyEx(
     return returnVal;
 }
 
-static int (WSAAPI* OldWSASend)(
-    _In_ SOCKET s,
-    _In_reads_(dwBufferCount) LPWSABUF lpBuffers,
-    _In_ DWORD dwBufferCount,
-    _Out_opt_ LPDWORD lpNumberOfBytesSent,
-    _In_ DWORD dwFlags,
-    _Inout_opt_ LPWSAOVERLAPPED lpOverlapped,
-    _In_opt_ LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
-    ) = WSASend;
-static int (WSAAPI* OldWSARecv)(
-    _In_ SOCKET s,
-    _In_reads_(dwBufferCount) __out_data_source(NETWORK) LPWSABUF lpBuffers,
-    _In_ DWORD dwBufferCount,
-    _Out_opt_ LPDWORD lpNumberOfBytesRecvd,
-    _Inout_ LPDWORD lpFlags,
-    _Inout_opt_ LPWSAOVERLAPPED lpOverlapped,
-    _In_opt_ LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
-    ) = WSARecv;
-static int (WSAAPI* OldWSAConnect)(
-    _In_ SOCKET s,
-    _In_reads_bytes_(namelen) const struct sockaddr FAR * name,
-    _In_ int namelen,
-    _In_opt_ LPWSABUF lpCallerData,
-    _Out_opt_ LPWSABUF lpCalleeData,
-    _In_opt_ LPQOS lpSQOS,
-    _In_opt_ LPQOS lpGQOS
-    ) = WSAConnect;
-static SOCKET (WSAAPI* OldWSASocketW)(
-    _In_ int af,
-    _In_ int type,
-    _In_ int protocol,
-    _In_opt_ LPWSAPROTOCOL_INFOW lpProtocolInfo,
-    _In_ GROUP g,
-    _In_ DWORD dwFlags
-    ) = WSASocketW;
+extern "C" __declspec(dllexport)LSTATUS WINAPI NewRegDeleteKeyEx(
+        _In_ HKEY hKey,
+        _In_ LPCWSTR lpSubKey,
+        _In_ REGSAM samDesired,
+        _Reserved_ DWORD Reserved
+        ){
+    if(entranceWatchdog)
+        return OldRegDeleteKeyEx(hKey, lpSubKey, samDesired, Reserved);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectRegDeleteKeyEx){
+        char* buffer = writeLog("RegDeleteKeyEx");
+        char* args = (char*)calloc(1, 0x200);
+        sprintf(args, "Arguments:\n"
+                        "\tHKEY hKey = 0x%p\n"
+                        "\tLPCWSTR lpSubKey = 0x%p / \"%ls\"\n"
+                        "\tREGSAM samDesired = %lu / %lx\n"
+                        "\tDWORD Reserved = %lu / %lx\n"
+                        "Current process name: ", hKey, lpSubKey, lpSubKey,
+                samDesired, samDesired, Reserved, Reserved);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    LSTATUS returnVal = OldRegDeleteKeyEx(hKey, lpSubKey, samDesired, Reserved);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    char retStr[0x30];
+    sprintf_s(retStr, "Return value: (LSTATUS) %#x\n", returnVal);
+    getLastInfoAndWrite(ArgsAndDetails, retStr);
+    entranceWatchdog = false;
+    return returnVal;
+}
+
+static int (WSAAPI* OldSend)(
+        _In_ SOCKET s,
+        _In_reads_bytes_(len) const char FAR * buf,
+        _In_ int len,
+        _In_ int flags
+        ) = send;
+static int (WSAAPI* OldRecv)(
+        _In_ SOCKET s,
+        _Out_writes_bytes_to_(len, return) __out_data_source(NETWORK) char FAR * buf,
+        _In_ int len,
+        _In_ int flags
+        ) = recv;
+static int (WSAAPI* OldBind)(
+        _In_ SOCKET s,
+        _In_reads_bytes_(namelen) const struct sockaddr FAR * name,
+        _In_ int namelen
+        ) = bind;
+static SOCKET (WSAAPI* OldSocket)(
+        _In_ int af,
+        _In_ int type,
+        _In_ int protocol
+        ) = socket;
+static int (WSAAPI* OldConnect)(
+        _In_ SOCKET s,
+        _In_reads_bytes_(namelen) const struct sockaddr FAR * name,
+        _In_ int namelen
+        ) = connect;
+static SOCKET (WSAAPI* OldAccept)(
+        _In_ SOCKET s,
+        _Out_writes_bytes_opt_(*addrlen) struct sockaddr FAR * addr,
+        _Inout_opt_ int FAR * addrlen
+        ) = accept;
+
+//static int (WSAAPI* OldWSASend)(
+//    _In_ SOCKET s,
+//    _In_reads_(dwBufferCount) LPWSABUF lpBuffers,
+//    _In_ DWORD dwBufferCount,
+//    _Out_opt_ LPDWORD lpNumberOfBytesSent,
+//    _In_ DWORD dwFlags,
+//    _Inout_opt_ LPWSAOVERLAPPED lpOverlapped,
+//    _In_opt_ LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
+//    ) = WSASend;
+//static int (WSAAPI* OldWSARecv)(
+//    _In_ SOCKET s,
+//    _In_reads_(dwBufferCount) __out_data_source(NETWORK) LPWSABUF lpBuffers,
+//    _In_ DWORD dwBufferCount,
+//    _Out_opt_ LPDWORD lpNumberOfBytesRecvd,
+//    _Inout_ LPDWORD lpFlags,
+//    _Inout_opt_ LPWSAOVERLAPPED lpOverlapped,
+//    _In_opt_ LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
+//    ) = WSARecv;
+//static int (WSAAPI* OldWSAConnect)(
+//    _In_ SOCKET s,
+//    _In_reads_bytes_(namelen) const struct sockaddr FAR * name,
+//    _In_ int namelen,
+//    _In_opt_ LPWSABUF lpCallerData,
+//    _Out_opt_ LPWSABUF lpCalleeData,
+//    _In_opt_ LPQOS lpSQOS,
+//    _In_opt_ LPQOS lpGQOS
+//    ) = WSAConnect;
+//static SOCKET (WSAAPI* OldWSASocketW)(
+//    _In_ int af,
+//    _In_ int type,
+//    _In_ int protocol,
+//    _In_opt_ LPWSAPROTOCOL_INFOW lpProtocolInfo,
+//    _In_ GROUP g,
+//    _In_ DWORD dwFlags
+//    ) = WSASocketW;
+
+extern "C" __declspec(dllexport)int WINAPI NewSend(
+        _In_ SOCKET s,
+        _In_reads_bytes_(len) const char FAR * buf,
+        _In_ int len,
+        _In_ int flags
+        ){
+    if(entranceWatchdog)
+        return OldSend(s, buf, len, flags);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectSend){
+        char* buffer = writeLog("send");
+        char* args = (char*)calloc(1, 0x200);
+        sprintf(args, "Arguments:\n"
+                        "\tSOCKET s = 0x%zx\n"
+                        "\tconst_char* buf = 0x%p\n"
+                        "\tint len = %d / %x\n"
+                        "\tint flags = %d / %x\n"
+                        "Current process name: ", s, buf,
+                len, len, flags, flags);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    int returnVal = OldSend(s, buf, len, flags);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    char retStr[0x30];
+    sprintf_s(retStr, "Return value: (int) %d / %#x\n", returnVal, returnVal);
+    getLastInfoAndWrite(ArgsAndDetails, retStr, "", len, buf);
+    entranceWatchdog = false;
+    return returnVal;
+}
+
+extern "C" __declspec(dllexport)int WINAPI NewRecv(
+        _In_ SOCKET s,
+        _Out_writes_bytes_to_(len, return) __out_data_source(NETWORK) char FAR * buf,
+        _In_ int len,
+        _In_ int flags
+        ){
+    if(entranceWatchdog)
+        return OldRecv(s, buf, len, flags);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectRecv){
+        char* buffer = writeLog("recv");
+        char* args = (char*)calloc(1, 0x200);
+        sprintf(args, "Arguments:\n"
+                        "\tSOCKET s = 0x%zx\n"
+                        "\tconst_char* buf = 0x%p\n"
+                        "\tint len = %d / %x\n"
+                        "\tint flags = %d / %x\n"
+                        "Current process name: ", s, buf,
+                len, len, flags, flags);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    int returnVal = OldRecv(s, buf, len, flags);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    char retStr[0x30];
+    sprintf_s(retStr, "Return value: (int) %d / %#x\n", returnVal, returnVal);
+    getLastInfoAndWrite(ArgsAndDetails, retStr, "", len, buf);
+    entranceWatchdog = false;
+    return returnVal;
+}
+
+extern "C" __declspec(dllexport)int WINAPI NewConnect(
+        _In_ SOCKET s,
+        _In_reads_bytes_(namelen) const struct sockaddr FAR * name,
+        _In_ int namelen
+        ){
+    if(entranceWatchdog)
+        return OldConnect(s, name, namelen);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectConnect){
+        char* buffer = writeLog("connect");
+        char* args = (char*)calloc(1, 0x200);
+        sprintf(args, "Arguments:\n"
+                        "\tSOCKET s = 0x%zx\n"
+                        "\tsockaddr* name = 0x%p\n"
+                        "\tshort name->sin_family = %d / 0x%hx\n"
+                        "\tULONG name->sin_addr.s_addr = %lu / 0x%lx\n"
+                        "\tshort name->sin_port = %d / %0xhx\n"
+                        "\tint namelen = %d / %x\n"
+                        "Current process name: ", s, name, ((sockaddr_in*)name)->sin_family,
+                ((sockaddr_in*)name)->sin_family, ((sockaddr_in*)name)->sin_addr.s_addr,
+                ((sockaddr_in*)name)->sin_addr.s_addr, ((sockaddr_in*)name)->sin_port,
+                ((sockaddr_in*)name)->sin_port, namelen, namelen);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    int returnVal = OldConnect(s, name, namelen);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    char retStr[0x30];
+    sprintf_s(retStr, "Return value: (int) %d / %#x\n", returnVal, returnVal);
+    getLastInfoAndWrite(ArgsAndDetails, retStr);
+    entranceWatchdog = false;
+    return returnVal;
+}
+
+extern "C" __declspec(dllexport)int WINAPI NewBind(
+        _In_ SOCKET s,
+        _In_reads_bytes_(namelen) const struct sockaddr FAR * name,
+        _In_ int namelen
+        ){
+    if(entranceWatchdog)
+        return OldBind(s, name, namelen);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectBind){
+        char* buffer = writeLog("bind");
+        char* args = (char*)calloc(1, 0x200);
+        sprintf(args, "Arguments:\n"
+                        "\tSOCKET s = 0x%zx\n"
+                        "\tsockaddr* name = 0x%p\n"
+                        "\tshort name->sin_family = %d / 0x%hx\n"
+                        "\tULONG name->sin_addr.s_addr = %lu / 0x%lx\n"
+                        "\tshort name->sin_port = %d / 0x%hx\n"
+                        "\tint namelen = %d / %x\n"
+                        "Current process name: ", s, name, ((sockaddr_in*)name)->sin_family,
+                ((sockaddr_in*)name)->sin_family, ((sockaddr_in*)name)->sin_addr.s_addr,
+                ((sockaddr_in*)name)->sin_addr.s_addr, ((sockaddr_in*)name)->sin_port,
+                ((sockaddr_in*)name)->sin_port, namelen, namelen);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    int returnVal = OldBind(s, name, namelen);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    char retStr[0x30];
+    sprintf_s(retStr, "Return value: (int) %d / %#x\n", returnVal, returnVal);
+    getLastInfoAndWrite(ArgsAndDetails, retStr);
+    entranceWatchdog = false;
+    return returnVal;
+}
+
+extern "C" __declspec(dllexport)SOCKET WSAAPI NewSocket(
+        _In_ int af,
+        _In_ int type,
+        _In_ int protocol
+        ){
+    if(entranceWatchdog)
+        return OldSocket(af, type, protocol);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectSocket){
+        char* buffer = writeLog("socket");
+        char* args = (char*)calloc(1, 0x200);
+        sprintf(args, "Arguments:\n"
+                        "\tint af = %d / 0x%x\n"
+                        "\tint type = %d / 0x%x\n"
+                        "\tint protocol = %d / 0x%x\n"
+                        "Current process name: ", af, af, type, type, protocol, protocol);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    SOCKET returnVal = OldSocket(af, type, protocol);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    char retStr[0x30];
+    sprintf_s(retStr, "Return value: (SOCKET) %#zx\n", returnVal);
+    getLastInfoAndWrite(ArgsAndDetails, retStr);
+    entranceWatchdog = false;
+    return returnVal;
+}
+
+extern "C" __declspec(dllexport)SOCKET WSAAPI NewAccept(
+        _In_ SOCKET s,
+        _Out_writes_bytes_opt_(*addrlen) struct sockaddr FAR * addr,
+        _Inout_opt_ int FAR * addrlen
+        ){
+    if(entranceWatchdog)
+        return OldAccept(s, addr, addrlen);
+    entranceWatchdog = true;
+    string ArgsAndDetails;
+    if(injectAccept){
+        char* buffer = writeLog("accept");
+        char* args = (char*)calloc(1, 0x200);
+        sprintf(args, "Arguments:\n"
+                        "\tSOCKET s = 0x%zx\n"
+                        "\tsockaddr* addr = 0x%p\n"
+                        "\tint* addrlen = 0x%p\n"
+                        "Current process name: ", s, addr, addrlen);
+        ArgsAndDetails = getMainInfo(buffer, args);
+        free(args);
+        free(buffer);
+    }
+    SOCKET returnVal = OldAccept(s, addr, addrlen);
+    if(ArgsAndDetails == ""){
+        entranceWatchdog = false;
+        return returnVal;
+    }
+    char retStr[0x30];
+    sprintf_s(retStr, "Return value: (SOCKET) %#zx\n", returnVal);
+    char outputArgVal[0x100];
+    sprintf_s(outputArgVal, "After execution:\n"
+                            "\tshort addr->sin_family = %d / 0x%hx\n"
+                            "\tULONG addr->sin_addr.s_addr = %lu / 0x%lx\n"
+                            "\tshort addr->sin_port = %d / 0x%hx\n", ((sockaddr_in*)addr)->sin_family,
+              ((sockaddr_in*)addr)->sin_family, ((sockaddr_in*)addr)->sin_addr.s_addr,
+              ((sockaddr_in*)addr)->sin_addr.s_addr, ((sockaddr_in*)addr)->sin_port,
+              ((sockaddr_in*)addr)->sin_port);
+    getLastInfoAndWrite(ArgsAndDetails, retStr, outputArgVal);
+    entranceWatchdog = false;
+    return returnVal;
+}
 
 BOOL APIENTRY DllMain( HMODULE hModule,
                        DWORD  ul_reason_for_call,
@@ -864,7 +1198,9 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     switch (ul_reason_for_call)
     {
     case DLL_PROCESS_ATTACH: {
-        logFile = new fstream("./hookLog/hookLogs.log", ios::trunc | ios::out);
+        // 记录内存内容的文件，其为二进制文件，格式如下：
+        // 一个内存块的记录包含地址、大小、内容三部分，地址8字节，大小4字节，后面为内容
+        memoryCap = new fstream("./hookLog/memoryCapture.dat", ios::binary | ios::out | ios::trunc);
         memset(lastHookbuffer, 0, 0x400);
         DisableThreadLibraryCalls(hModule);
         DetourTransactionBegin();
@@ -884,6 +1220,13 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         DetourAttach(&(PVOID&)OldRegDeleteValue, (void*)NewRegDeleteValue);
         DetourAttach(&(PVOID&)OldRegCloseKey, (void*)NewRegCloseKey);
         DetourAttach(&(PVOID&)OldRegOpenKeyEx, (void*)NewRegOpenKeyEx);
+        DetourAttach(&(PVOID&)OldRegDeleteKeyEx, (void*)NewRegDeleteKeyEx);
+        DetourAttach(&(PVOID&)OldSend, (void*)NewSend);
+        DetourAttach(&(PVOID&)OldRecv, (void*)NewRecv);
+        DetourAttach(&(PVOID&)OldConnect, (void*)NewConnect);
+        DetourAttach(&(PVOID&)OldBind, (void*)NewBind);
+        DetourAttach(&(PVOID&)OldSocket, (void*)NewSocket);
+        DetourAttach(&(PVOID&)OldAccept, (void*)NewAccept);
         DetourTransactionCommit();
         break;
     }
@@ -907,9 +1250,16 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         DetourDetach(&(PVOID&)OldRegDeleteValue, (void*)NewRegDeleteValue);
         DetourDetach(&(PVOID&)OldRegCloseKey, (void*)NewRegCloseKey);
         DetourDetach(&(PVOID&)OldRegOpenKeyEx, (void*)NewRegOpenKeyEx);
+        DetourDetach(&(PVOID&)OldRegDeleteKeyEx, (void*)NewRegDeleteKeyEx);
+        DetourDetach(&(PVOID&)OldSend, (void*)NewSend);
+        DetourDetach(&(PVOID&)OldRecv, (void*)NewRecv);
+        DetourDetach(&(PVOID&)OldConnect, (void*)NewConnect);
+        DetourDetach(&(PVOID&)OldBind, (void*)NewBind);
+        DetourDetach(&(PVOID&)OldSocket, (void*)NewSocket);
+        DetourDetach(&(PVOID&)OldAccept, (void*)NewAccept);
         DetourTransactionCommit();
         logCounter = 0;
-        logFile->close();
+        memoryCap->close();
         break;
     }
     }
