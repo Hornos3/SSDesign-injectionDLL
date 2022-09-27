@@ -1,4 +1,6 @@
 ﻿// dllmain.cpp : 定义 DLL 应用程序的入口点。
+#define DEBUG 1
+
 #include "pch.h"
 #include "framework.h"
 #include "WinSock2.h"
@@ -10,6 +12,8 @@
 #include <iostream>
 #include <fstream>
 #include <QString>
+#include <QMutex>
+#include <vector>
 #include <QReadWriteLock>
 
 using namespace std;
@@ -50,12 +54,19 @@ bool injectBind = false;
 bool injectSocket = false;
 bool injectAccept = false;
 
-bool mutexSignal = false;
-char lastHookbuffer[0x400] = {0};
+atomic_bool mutexSignal = false;
+char lastHookbuffer[0x800] = {0};
+
+std::vector<module> modules = {};
 #pragma data_seg()
 
+#ifdef DEBUG
+ofstream totalLog = ofstream("./hookLog/totalHook.cdb", ios::trunc);
+#endif
 bool entranceWatchdog = false;
+bool fileInfoGot = false;
 unsigned int logCounter = 0;
+QMutex boolMutex;
 #pragma comment(linker, "/Section:Shared,rws")
 
 extern "C" __declspec(dllexport) void openInjectMessageBoxA(bool choice){injectMessageBoxA = choice;};
@@ -82,8 +93,17 @@ extern "C" __declspec(dllexport) void openInjectSocket(bool choice){injectSocket
 extern "C" __declspec(dllexport) void openInjectBind(bool choice){injectBind = choice;};
 extern "C" __declspec(dllexport) void openInjectAccept(bool choice){injectAccept = choice;};
 
-extern "C" __declspec(dllexport) void setMutexSignal(){mutexSignal = false;};
-extern "C" __declspec(dllexport) bool getMutexSignal(){return mutexSignal;};
+extern "C" __declspec(dllexport) void setMutexSignal(){
+    boolMutex.lock();
+    mutexSignal = false;
+    boolMutex.unlock();
+};
+extern "C" __declspec(dllexport) bool getMutexSignal(){
+    boolMutex.lock();
+    bool sig = mutexSignal;
+    boolMutex.unlock();
+    return sig;
+};
 
 extern "C" __declspec(dllexport) char* getLastHookBeforeCall(){return lastHookbuffer;};
 
@@ -100,7 +120,7 @@ string getFileInfo(string processNameA){
     STDIN = GetStdHandle(STD_INPUT_HANDLE);
     STDOUT = GetStdHandle(STD_OUTPUT_HANDLE);
     STDERR = GetStdHandle(STD_ERROR_HANDLE);
-    char buf[0x100];
+    char buf[0x400];
     sprintf_s(buf, "STDIN handle: %#zx\n"
                    "STDOUT handle: %#zx\n"
                    "STDERR handle: %#zx\n", (size_t)STDIN, (size_t)STDOUT, (size_t)STDERR);
@@ -143,6 +163,7 @@ string getFileInfo(string processNameA){
     totalOut += "Legal Copyright: " + legalCopyright + "\n";
     totalOut += "Original File Name: " + originalFileName + "\n";
     totalOut += "Product Version: " + productVersion + "\n";
+    fileInfoGot = true;
 
     return totalOut;
 }
@@ -166,7 +187,14 @@ string getMainInfo(char* currentTime, char* argsInfo){
     totalOut = wstring2string(totalOutW);
 
     string processNameA = wstring2string(processName);
-    string fileInfo = getFileInfo(processNameA);
+
+    string traceback = ShowTraceStack(nullptr).toStdString();
+
+    string fileInfo;
+    if(!fileInfoGot)
+        fileInfo = traceback + getFileInfo(processNameA);
+    else
+        fileInfo = traceback;
 
     totalOut += fileInfo;
     strcpy_s(lastHookbuffer, totalOut.c_str());
@@ -181,6 +209,7 @@ void getLastInfoAndWrite(string totalOut, string returnVal, string otherString =
 
     while(mutexSignal);
 
+    boolMutex.lock();
     // 写入二进制文件，拷贝内存中的内容
     uint64_t addr = (uint64_t)buf;
     unsigned size = bufLen;
@@ -194,11 +223,15 @@ void getLastInfoAndWrite(string totalOut, string returnVal, string otherString =
         tmpCap->write(buf, bufLen);
     tmpCap->close();
 
+#ifdef DEBUG
+    totalLog << totalOut;
+#endif
     tmpFile->open("./hookLog/lasthook.tmp", ios::out | ios::trunc);
     *tmpFile << totalOut;
     tmpFile->close();
 
     mutexSignal = true;
+    boolMutex.unlock();
 
     logCounter++;
 }
@@ -675,7 +708,7 @@ extern "C" __declspec(dllexport)LSTATUS WINAPI NewRegCreateKeyEx(
     string ArgsAndDetails;
     if(injectRegCreateKeyEx){
         char* buffer = writeLog("RegCreateKeyEx");
-        char* args = (char*)calloc(1, 0x200);
+        char* args = (char*)calloc(0x400, 1);
         sprintf(args, "Arguments:\n"
                         "\tHKEY hKey = 0x%p\n"
                         "\tLPCWSTR lpSubKey = 0x%p / \"%ls\"\n"
@@ -930,42 +963,6 @@ static SOCKET (WSAAPI* OldAccept)(
         _Inout_opt_ int FAR * addrlen
         ) = accept;
 
-//static int (WSAAPI* OldWSASend)(
-//    _In_ SOCKET s,
-//    _In_reads_(dwBufferCount) LPWSABUF lpBuffers,
-//    _In_ DWORD dwBufferCount,
-//    _Out_opt_ LPDWORD lpNumberOfBytesSent,
-//    _In_ DWORD dwFlags,
-//    _Inout_opt_ LPWSAOVERLAPPED lpOverlapped,
-//    _In_opt_ LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
-//    ) = WSASend;
-//static int (WSAAPI* OldWSARecv)(
-//    _In_ SOCKET s,
-//    _In_reads_(dwBufferCount) __out_data_source(NETWORK) LPWSABUF lpBuffers,
-//    _In_ DWORD dwBufferCount,
-//    _Out_opt_ LPDWORD lpNumberOfBytesRecvd,
-//    _Inout_ LPDWORD lpFlags,
-//    _Inout_opt_ LPWSAOVERLAPPED lpOverlapped,
-//    _In_opt_ LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine
-//    ) = WSARecv;
-//static int (WSAAPI* OldWSAConnect)(
-//    _In_ SOCKET s,
-//    _In_reads_bytes_(namelen) const struct sockaddr FAR * name,
-//    _In_ int namelen,
-//    _In_opt_ LPWSABUF lpCallerData,
-//    _Out_opt_ LPWSABUF lpCalleeData,
-//    _In_opt_ LPQOS lpSQOS,
-//    _In_opt_ LPQOS lpGQOS
-//    ) = WSAConnect;
-//static SOCKET (WSAAPI* OldWSASocketW)(
-//    _In_ int af,
-//    _In_ int type,
-//    _In_ int protocol,
-//    _In_opt_ LPWSAPROTOCOL_INFOW lpProtocolInfo,
-//    _In_ GROUP g,
-//    _In_ DWORD dwFlags
-//    ) = WSASocketW;
-
 extern "C" __declspec(dllexport)int WINAPI NewSend(
         _In_ SOCKET s,
         _In_reads_bytes_(len) const char FAR * buf,
@@ -1205,6 +1202,7 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         DisableThreadLibraryCalls(hModule);
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
+        getAllLoadedModules();
         DetourAttach(&(PVOID&)OldMessageBoxW, (void*)NewMessageBoxW);
         DetourAttach(&(PVOID&)OldMessageBoxA, (void*)NewMessageBoxA);
         DetourAttach(&(PVOID&)OldHeapCreate, (void*)NewHeapCreate);
@@ -1260,6 +1258,9 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         DetourTransactionCommit();
         logCounter = 0;
         memoryCap->close();
+#ifdef DEBUG
+        totalLog.close();
+#endif
         break;
     }
     }
